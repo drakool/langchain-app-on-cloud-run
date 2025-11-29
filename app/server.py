@@ -1,46 +1,33 @@
+import os
+import pg8000
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from langserve import add_routes
-import pg8000
-import os
 from google.cloud.sql.connector import Connector
-from langchain_google_vertexai import VertexAI
-from langchain_google_vertexai import VertexAIEmbeddings
+
+# LangChain Imports
+from langchain_community.vectorstores.pgvector import PGVector
+from langchain_google_vertexai import VertexAIEmbeddings, ChatVertexAI, HarmBlockThreshold, HarmCategory
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough, RunnableParallel
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import PromptTemplate
-from langchain_community.vectorstores.pgvector import PGVector
 
-app = FastAPI()
-
-
-@app.get("/")
-async def redirect_root_to_docs() -> RedirectResponse:
-    return RedirectResponse("/docs")
-
-
-# (1) Initialize VectorStore
+# 1. Database Connection Setup
 connector = Connector()
-
 
 def getconn() -> pg8000.dbapi.Connection:
     conn: pg8000.dbapi.Connection = connector.connect(
-        os.getenv("DB_INSTANCE_NAME", ""),
+        os.environ.get("DB_INSTANCE_NAME", ""),
         "pg8000",
-        user=os.getenv("DB_USER", ""),
-        password=os.getenv("DB_PASS", ""),
-        db=os.getenv("DB_NAME", ""),
+        user=os.environ.get("DB_USER", ""),
+        password=os.environ.get("DB_PASS", ""),
+        db=os.environ.get("DB_NAME", ""),
     )
     return conn
 
-EMBEDDING_MODEL = "text-embedding-004" 
-def index_data():
-    # 2. Setup Embeddings
-    embedding_service = VertexAIEmbeddings(
-        model_name=EMBEDDING_MODEL
-    )
-    return embedding_service
-
+# 2. Initialize Vector Store
+# Ensure this matches the model used in your indexer.py (text-embedding-004)
+embedding_service = VertexAIEmbeddings(model_name="text-embedding-004")
 
 vectorstore = PGVector(
     connection_string="postgresql+pg8000://",
@@ -48,54 +35,66 @@ vectorstore = PGVector(
     engine_args=dict(
         creator=getconn,
     ),
-    embedding_function=VertexAIEmbeddings(
-        model_name="textembedding-gecko@003"
-    )
+    embedding_function=embedding_service,
 )
 
+# 3. Create the Retriever
+retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
-# (2) Build retriever
-
-
-def concatenate_docs(docs):
+def format_docs(docs):
+    # Debugging: Print retrieved docs to logs
+    print(f"DEBUG: Retrieved {len(docs)} documents.")
     return "\n\n".join(doc.page_content for doc in docs)
 
+# 4. Define the Prompt Template (Chat Prompt)
+template = """You are a helper for Google Cloud Run developers.
+Answer the question based only on the following context:
+{context}
 
-notes_retriever = vectorstore.as_retriever() | concatenate_docs
+Question: {question}
+"""
+prompt = ChatPromptTemplate.from_template(template)
 
-# (3) Create prompt template
-prompt_template = PromptTemplate.from_template(
-    """You are a Cloud Run expert answering questions. 
-Use the retrieved release notes to answer questions
-Give a concise answer, and if you are unsure of the answer, just say so.
+# 5. Initialize the LLM (Gemini) with Safety Settings
+# CRITICAL FIX: Lowering safety thresholds to prevent empty responses
+safety_settings = {
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+}
 
-Release notes: {notes}
-
-Here is your question: {query}
-Your answer: """)
-
-# (4) Initialize LLM
-llm = VertexAI(
-    model_name="gemini-1.0-pro-001",
-    temperature=0.2,
-    max_output_tokens=100,
-    top_k=40,
-    top_p=0.95
+llm = ChatVertexAI(
+    model="gemini-2.0-flash-001", 
+    temperature=0,
+    safety_settings=safety_settings
 )
 
-# (5) Chain everything together
+# 6. Build the RAG Chain
 chain = (
     RunnableParallel({
-        "notes": notes_retriever,
-        "query": RunnablePassthrough()
+        "context": retriever | format_docs,
+        "question": RunnablePassthrough()
     })
-    | prompt_template
+    | prompt
     | llm
     | StrOutputParser()
 )
-add_routes(app, chain)
+
+# 7. FastAPI App Definition
+app = FastAPI(
+    title="LangChain Server",
+    version="1.0",
+    description="A simple API server using LangChain's Runnable interfaces",
+)
+
+@app.get("/")
+async def redirect_root_to_docs():
+    return RedirectResponse("/docs")
+
+# 8. Add the Chain to the App
+add_routes(app, chain, path="/rag")
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
