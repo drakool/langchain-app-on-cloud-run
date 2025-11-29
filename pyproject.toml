@@ -1,0 +1,41 @@
+[tool.poetry]
+name = "run-rag3"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+packages = [
+    { include = "app" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+uvicorn = "^0.23.2"
+
+# 1. Core Framework (Upgrading to LangChain 0.3 stack)
+# LangServe 0.3 is required for LangChain 0.3 compatibility
+langserve = {extras = ["server"], version = "^0.3.0"}
+pydantic = "^2.9.0"
+typing-extensions = "^4.10.0"
+
+# 2. Google Cloud
+# Using a recent version to ensure TypeAliasType support
+google-cloud-aiplatform = "^1.60.0"
+google-cloud-bigquery = "^3.13.0"
+
+# 3. LangChain Integrations
+# moving to 2.x (Vertex) and 0.3.x (Community) ensures native Pydantic V2 support
+langchain-google-vertexai = "^2.0.0"
+langchain-community = "^0.3.0"
+
+# 4. Database Drivers
+cloud-sql-python-connector = {extras = ["pg8000"], version = "^1.18.5"}
+pgvector = "^0.4.1"
+pg8000 = "^1.30.0"
+
+[tool.poetry.group.dev.dependencies]
+langchain-cli = ">=0.0.15"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
